@@ -2,109 +2,119 @@ import {
   createBundlerClient,
   toSoladySmartAccount,
 } from "viem/account-abstraction";
-import {
-  createPublicClient,
-  custom,
-  parseEther,
-  type Address,
-  http,
-} from "viem";
+import { createPublicClient, parseEther } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { local070Instance } from "../instances";
+import { setBalance, getBlockNumber } from "viem/actions";
 
-/**
- * Viem AA - Solady Smart Account Tests
- *
- * This test demonstrates how to use viem's native Account Abstraction support
- * instead of @aa-sdk/core. It uses toSoladySmartAccount from viem/account-abstraction.
- *
- * Note: These tests show the pattern for using viem AA. In a real environment,
- * you would need to ensure Solady factory is deployed on your target network.
- */
-describe("Viem AA - Solady Smart Account Tests", () => {
-  it("should demonstrate viem AA pattern for sending user operations", () => {
-    // This test shows the pattern for migrating from @aa-sdk/core to viem AA
+describe("Viem AA - Solady Smart Account", () => {
+  let client: ReturnType<typeof local070Instance.getClient>;
 
-    const codeExample = `
-    // BEFORE (using @aa-sdk/core):
-    import { createLightAccountClient } from "@aa-sdk/core";
-    
-    const client = await createLightAccountClient({
-      signer,
-      transport: custom(instance.getClient()),
-      chain: instance.chain,
-    });
+  beforeAll(async () => {
+    client = local070Instance.getClient();
+    // Test that infrastructure is running
+    const blockNumber = await getBlockNumber(client);
+    expect(blockNumber).toBeGreaterThan(0n);
+  }, 30_000);
 
-    // AFTER (using viem/account-abstraction):
-    import { createBundlerClient, toSoladySmartAccount } from "viem/account-abstraction";
-    import { createPublicClient, custom } from "viem";
-    
-    // Create public client
-    const publicClient = createPublicClient({
-      chain: local070Instance.chain,
-      transport: custom(local070Instance.getClient()),
-    });
+  it("should send a user operation and verify it was mined", async () => {
+    const owner = privateKeyToAccount(generatePrivateKey());
 
-    // Create bundler client  
+    // Create bundler client using the existing transport
     const bundlerClient = createBundlerClient({
-      chain: local070Instance.chain,
-      transport: custom(local070Instance.getClient()),
+      ...local070Instance.clientConfig,
+    });
+
+    // Create public client using the existing transport
+    const publicClient = createPublicClient({
+      ...local070Instance.clientConfig,
     });
 
     // Create Solady smart account
     const smartAccount = await toSoladySmartAccount({
       client: publicClient,
-      owner: privateKeyToAccount(generatePrivateKey()),
-      salt: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      owner,
     });
 
-    // Send user operation
+    // Fund the smart account
+    await setBalance(client, {
+      address: smartAccount.address,
+      value: parseEther("1"),
+    });
+
+    // Fund the owner address (target of the transfer)
+    await setBalance(client, {
+      address: owner.address,
+      value: parseEther("0"),
+    });
+
+    // Send a user operation
     const userOpHash = await bundlerClient.sendUserOperation({
       account: smartAccount,
-      calls: [{
-        to: targetAddress,
-        value: parseEther("0.01"),
-        data: "0x",
-      }],
+      calls: [
+        {
+          to: owner.address,
+          value: parseEther("0.01"),
+        },
+      ],
     });
 
-    // Wait for receipt
+    expect(userOpHash).toBeDefined();
+    expect(userOpHash).toMatch(/^0x[a-fA-F0-9]{64}$/);
+
+    // Wait for the user operation to be mined
     const receipt = await bundlerClient.waitForUserOperationReceipt({
       hash: userOpHash,
+      timeout: 30_000,
     });
-    `;
 
-    console.log("Migration pattern for user operations:", codeExample);
+    expect(receipt).toBeDefined();
+    expect(receipt.success).toBe(true);
+    expect(receipt.userOpHash).toBe(userOpHash);
+    expect(receipt.receipt.transactionHash).toBeDefined();
 
-    // Verify the pattern is syntactically correct
-    expect(typeof createBundlerClient).toBe("function");
-    expect(typeof toSoladySmartAccount).toBe("function");
-    expect(local070Instance.chain).toBeDefined();
-    expect(typeof local070Instance.getClient).toBe("function");
+    // Verify the balance was transferred
+    const balance = await publicClient.getBalance({
+      address: owner.address,
+    });
+    expect(balance).toBe(parseEther("0.01"));
   });
 
-  it("should demonstrate viem AA pattern for message signing", () => {
-    // This test shows the pattern for signing messages with viem AA
+  it("should sign a message using a smart account and verify the signature", async () => {
+    const owner = privateKeyToAccount(generatePrivateKey());
 
-    const codeExample = `
-    // Sign message using smart account
-    const signature = await smartAccount.signMessage({ 
-      message: "Hello from Solady Smart Account!",
+    const publicClient = createPublicClient({
+      ...local070Instance.clientConfig,
     });
 
-    // Verify signature using EIP-1271
+    const smartAccount = await toSoladySmartAccount({
+      client: publicClient,
+      owner,
+    });
+
+    // Fund the smart account for deployment
+    await setBalance(client, {
+      address: smartAccount.address,
+      value: parseEther("0.1"),
+    });
+
+    // Sign a message
+    const message = "Hello from Viem AA!";
+    const signature = await smartAccount.signMessage({
+      message,
+    });
+
+    expect(signature).toBeDefined();
+    expect(signature).toMatch(/^0x[a-fA-F0-9]+$/);
+
+    // Verify the signature using viem's verifyMessage
     const isValid = await publicClient.verifyMessage({
       address: smartAccount.address,
-      message: "Hello from Solady Smart Account!",
+      message,
       signature,
     });
-    `;
 
-    console.log("Migration pattern for message signing:", codeExample);
-
-    // Verify imports exist
-    expect(typeof privateKeyToAccount).toBe("function");
-    expect(typeof createPublicClient).toBe("function");
+    expect(isValid).toBe(true);
   });
 });
